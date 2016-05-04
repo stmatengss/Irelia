@@ -1,0 +1,144 @@
+/**
+  * Created by stmatengss on 16-4-13.
+  */
+
+import org.apache.spark.rdd._
+import org.apache.spark.HashPartitioner
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
+import org.apache.spark.SparkContext._
+import org.apache.spark.graphx._
+
+//val edges=sc.makeRDD(Array((8,1),(8,5),(9,8),(8,7),(7,3),(3,2),(6,3),(6,4)))
+//val edgesLoad=sc.makeRDD(Array((1L,2L),(2L,3L),(2L,4L),(4L,5L),(6L,7L)))
+
+object WCC{
+
+  val que=scala.collection.mutable.Queue[RDD[(Long,Long)]]();
+  val resPro=scala.collection.mutable.ArrayBuffer[(Long,Long)]();
+  val UNUSE=0;
+  val USE=1;
+  val USEANDCENTER=2;
+
+
+  def bfsReplica(e: Array[(Long,Array[Long])] ,centers: Array[Long],nonCenters: Array[Long]):Iterator[(Long,Long)]={
+	val adList=e.toArray;
+	var flag=centers.length;
+	println("adList:",adList.foreach(print));
+	val vertex=scala.collection.mutable.ArrayBuffer[(Long,Long)]();
+	val coVertex=scala.collection.mutable.ArrayBuffer[(Long,Long)]();
+	val resVertex=scala.collection.mutable.ArrayBuffer[(Long,Long)]();
+	val used=Array.fill(adList.size)(true);
+	val isReplica=Array.fill(adList.size)(true);
+	val trans=adList.map(x=>x._1).zipWithIndex.toMap;
+	var root:Long=0
+	var now:Int=0
+	var son:Int=0
+	var rootTr:Int=0;
+	val que=scala.collection.mutable.Queue[Int]();
+	centers.foreach({
+		case x=>{isReplica(trans(x))=false;}
+	  }
+	);
+	for(i<-(centers++nonCenters)){
+	  root=i;
+	  flag-=1;
+	  rootTr=trans(root);
+	  if(flag>=0)isReplica(rootTr)=false;
+	  //println(root,rootTr);
+	  if(used(rootTr)) {
+		que.enqueue(rootTr);
+		used(rootTr)=false;
+		while(!que.isEmpty){
+		  now=que.dequeue();
+		  for(j<-adList(now)._2){
+			//println(son)
+			son=trans(j);
+			if(used(son)) {
+			  if(flag>=0){
+				if(isReplica(son))resVertex+=((j,root));
+				else vertex+=((j,root));
+			  };
+			  else coVertex+=((j,root));
+			  que.enqueue(son);
+			  used(son)=false;
+			}
+		  }
+		}
+	  }
+	}
+	vertex.toIterator
+  }
+
+  def update(part:Iterator[((Long,Long),(Long,Long))]):Iterator[(Long,Long)]={
+	val triplets=part.toArray;
+	println("triplets:",triplets.foreach(print));
+	val outDegrees=triplets.flatMap({case (x,y)=>Iterator(x,y)}).distinct;
+	println("outDefrees:",outDegrees.foreach(print));
+	val adList=triplets.map(x=>(x._1._1,x._2._1)).flatMap({
+		case(src,dst)=>Iterator((src,dst),(dst,src))
+	  }
+	).groupBy(_._1).map(x=>(x._1,x._2.map(_._2)));  // TODO
+	val partOutDegrees=adList.map(x=>(x._1,x._2.length));
+	val centers=scala.collection.mutable.ArrayBuffer[(Long)]();
+	var centerCount=0;
+	val nonCenters=scala.collection.mutable.ArrayBuffer[(Long)]();
+	println("partOutDegrees:",partOutDegrees.foreach(print));
+	// or Join?  If the partitioner will make the RDD in order
+	outDegrees.zip(partOutDegrees).foreach(
+	  {
+		case(pro,now)=>{if(pro._2==now._2){
+		  nonCenters+=(pro._1);
+		}else{
+		  centerCount+=1;
+		  centers+=(pro._1);
+		  }
+		}
+	  }
+	)
+	bfsReplica(adList.toArray,centers.toArray,nonCenters.toArray);
+  }
+
+  def run(edgesLoad:RDD[(Long,Long)], cluster: Long, directed:Boolean):RDD[(Long,Long)] = {
+	val LOWER_BOUND:Long=edgesLoad.count/cluster;
+	var edges:RDD[(Long,Long)]=null;
+	var clusterNum:Long=cluster;
+
+	if(directed==true){
+	  edges=edgesLoad.filter({case (x,y)=>{x<y}});
+	}else{
+	  edges=edgesLoad;
+	}
+	println("clusterNum",clusterNum);
+	while(clusterNum>1){
+//	  clusterNum=Math.min(clusterNum,Math.max(1,(edges.count/LOWER_BOUND)));
+	  edges=edges.partitionBy(new HashPartitioner(clusterNum.toInt));
+	  clusterNum=clusterNum/2;
+	  println("clusterNum",clusterNum);
+	  val outDegrees:RDD[(Long,Long)]=edges.flatMap({
+		  case (src,dst)=>Array((src.toLong,1L),(dst.toLong,1L))
+		}
+	  ).reduceByKey(_+_).map(x=>(x._1,x._2));
+	  println("edges:",edges.foreach(println(_)))
+	  val triplets=edges.join(outDegrees).map(
+		{case (x,(y,n))=>(y,(x,n))}
+	  ).join(outDegrees).map(
+		{case (x,(y,n))=>((x,n),y)}
+	  );
+	  println("triplets:",triplets.foreach(println(_)))
+	  edges=triplets.mapPartitions(update,true);
+	  println("edges:",edges.foreach(println(_)))
+	  //edges=res._1;
+	  //que+=res._2;
+	}
+	edges=edges.partitionBy(new HashPartitioner(1));
+	edges
+//	var shrunkPair=edges;
+//	while(que.isEmpty){
+//	  shrunkPair=shrunkPair.join(que.dequeue).map(x=>(x._1,x._2._2));
+//	}
+//	shrunkPair;
+  }
+}
+
+

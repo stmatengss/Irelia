@@ -1,0 +1,167 @@
+/**
+  * Created by stmatengss on 16-4-13.
+  */
+
+import org.apache.spark.rdd._
+import org.apache.spark.HashPartitioner
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
+import org.apache.spark.SparkContext._
+import org.apache.spark.graphx._
+
+import scala.collection
+
+//val edges=sc.makeRDD(Array((8,1),(8,5),(9,8),(8,7),(7,3),(3,2),(6,3),(6,4)))
+//val edgesLoad=sc.makeRDD(Array((1L,2L),(2L,3L),(2L,4L),(4L,5L),(6L,7L)))
+
+object CT {
+
+  //  val que=scala.collection.mutable.Queue[RDD[(Long,Long)]]();
+  //  val resPro=scala.collection.mutable.ArrayBuffer[(Long,Long)]();
+  val SUM: Long = -1;
+
+  def countingReplica(e: Array[(Long, Array[Long])], ve: Array[Long]): Long= {
+	val adList = e;
+	var res:Long = 0;
+	val trans = adList.map(x => x._1).zipWithIndex.toMap;
+	var root: Int = 0;
+	var count: Long = 0;
+
+/*	for (u <- (nonCenters)) {
+	  root = trans(u);
+
+	  for (v <- adList(root)._2 if v > u) {
+		for (w <- adList(root)._2 if w > u;
+			 if adList(trans(v))._2.exists(_ == w)) {
+		  count += 1;
+		}
+	  }
+	  resVertex += ((u, count));
+	}*/
+		//a new method to calculate
+//	println("/*********************/")
+	for(u<-ve){
+	  if(trans.contains(u)) {
+		root = trans(u);
+		println("U", u)
+		count = 0;
+		for (v <- adList(root)._2) {
+		  if(trans.contains(v)){
+			count += adList(trans(v))._2.intersect(adList(root)._2).length
+		  }
+		}
+		res += count;
+	  }
+	}
+//	println("/*********************/")
+	println("Res=="+res.toString);
+	res
+  }
+
+  def update(part: Iterator[((Long, Long), (Long, Long))]): Iterator[(Long, Long)] = {
+	val triplets = part.toArray;
+	println("triplets:",triplets.foreach(print));
+	val outDegrees = triplets.flatMap({ case (x, y) => Iterator(x, y) }).distinct.sortWith({
+	  case (x, y) => (x._1 < y._1)
+	});
+		println("outDefrees:",outDegrees.foreach(print));
+	val edges=triplets.map(x => (x._1._1, x._2._1));
+	// TODO
+	val partOutDegrees = edges.flatMap({
+	  case (src, dst) => Iterator((src, dst), (dst, src))
+	}
+	).groupBy(_._1).map({
+	  case (x, y) => (x, y.length)
+	}).toArray.sortWith({
+	  case (x, y) => (x._1 < y._1)
+	});
+	val centers = scala.collection.mutable.ArrayBuffer[(Long)]();
+	val nonCenters = scala.collection.mutable.ArrayBuffer[(Long)]();
+		println("partOutDegrees:",partOutDegrees.foreach(print));
+	// or Join?  If the partitioner will make the RDD in order
+	outDegrees.zip(partOutDegrees).foreach(
+	  {
+		case (pro, now) => {
+		  if (pro._2 == now._2) {
+			nonCenters += (pro._1);
+		  } else {
+			centers += (pro._1);
+		  }
+		}
+	  }
+	)
+	val trans=centers.toSet;
+	val less=edges.filter({
+	  case (x,y)=>{trans(x)&&trans(y)}
+	})
+	val adList= edges.map({
+	  case (x,y)=>{
+		trans(x) match{
+		  case true=>(y,x);
+		  case _=>(x,y);
+		}
+	  }
+	}).groupBy(_._1).map(x => (x._1, x._2.map(_._2)));
+	val res=countingReplica(adList.toArray, (nonCenters).toArray);
+
+	Iterator((res,SUM))++less.toIterator;
+  }
+
+  def run(edgesLoad: RDD[(Long, Long)], cluster: Long, directed: Boolean): Long= {
+
+	val LOWER_BOUND: Long = edgesLoad.count / cluster;
+	var edges: RDD[(Long, Long)] = null;
+	var resTmp: RDD[(Long, Long)] = null;
+	var clusterNum: Long = cluster;
+	var resPro: Long=0;
+	var res:Long=0;
+
+	if (directed == true) {
+	  edges = edgesLoad.filter({
+		case (x, y) => {x < y}
+	  })
+	} else {
+	  edges = edgesLoad
+	}
+	//	println("clusterNum",clusterNum);
+	while (clusterNum >= 1) {
+	  edges = edges.partitionBy(new HashPartitioner(clusterNum.toInt));
+	  //	  clusterNum=clusterNum/2;
+	  //	  println("clusterNum",clusterNum);
+	  val outDegrees: RDD[(Long, Long)] = edges.flatMap({
+		case (src, dst) => Array((src.toLong, 1L), (dst.toLong, 1L))
+	  }
+	  ).reduceByKey(_ + _);
+	  //	  println("edges:",edges.foreach(println(_)))
+	  val triplets = edges.join(outDegrees).map(
+		{ case (x, (y, n)) => (y, (x, n)) }
+	  ).join(outDegrees).map(
+		{ case (x, (y, n)) => ((x, n), y) }
+	  );
+//	  println("triplets:",triplets.foreach(println(_)))
+	  resTmp = triplets.mapPartitions(update, true);
+	  resTmp.cache().count()
+	  edges = resTmp.filter({ case (x, y) => {
+		y !=SUM
+	  }
+	  });
+	  resPro=resTmp.filter({ case (x, y) => {
+		y == SUM
+	  }
+	  }).keys.reduce(_+_)
+	  //TODO more profermance
+	  println("resPro:",resPro)
+	  res+=resPro;
+	  if (clusterNum == 1) clusterNum = 0;
+	  else clusterNum = Math.max(1, Math.min(clusterNum, edges.count / LOWER_BOUND));
+	  println("ClusterNum=", clusterNum, edges.count());
+	  println("edges:",edges.foreach(print(_)))
+	  //println("resPro:",resPro.foreach(println(_)))
+	}
+	//	println("edges::",edges.foreach(print(_)));
+	//	println("Length:",que.length)
+	res
+  }
+}
+
+

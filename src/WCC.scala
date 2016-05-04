@@ -1,0 +1,195 @@
+/**
+  * Created by stmatengss on 16-4-13.
+  */
+
+import org.apache.spark.rdd._
+import org.apache.spark.HashPartitioner
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
+import org.apache.spark.SparkContext._
+import org.apache.spark.graphx._
+import shrunk.PowerLyraParitioner
+
+//val edges=sc.makeRDD(Array((8,1),(8,5),(9,8),(8,7),(7,3),(3,2),(6,3),(6,4)))
+//val edgesLoad=sc.makeRDD(Array((1L,2L),(2L,3L),(2L,4L),(4L,5L),(6L,7L)))
+
+object WCC {
+
+  //  val que=scala.collection.mutable.Queue[RDD[(Long,Long)]]();
+  //  val resPro=scala.collection.mutable.ArrayBuffer[(Long,Long)]();
+  val UNUSE: Int = 0;
+  val USE: Int = 1;
+  val SUCEESS: Int = 2;
+
+
+  def bfsReplica(e: Array[(Long, Array[Long])], centers: Array[Long], nonCenters: Array[Long]): Iterator[((Long, Long), Int)] = {
+	val adList = e.toArray;
+	var flag = centers.length;
+	val vertex = scala.collection.mutable.ArrayBuffer[(Long, Long)]();
+	val coVertex = scala.collection.mutable.ArrayBuffer[(Long, Long)]();
+	val resVertex = scala.collection.mutable.ArrayBuffer[(Long, Long)]();
+	val used = Array.fill(adList.size)(true);
+	val isReplica = Array.fill(adList.size)(true);
+	val trans = adList.map(x => x._1).zipWithIndex.toMap;
+	var root: Long = 0
+	var now: Int = 0
+	var son: Int = 0
+	var rootTr: Int = 0;
+	val que = scala.collection.mutable.Queue[Int]();
+	centers.foreach({
+	  case x => {
+		isReplica(trans(x)) = false;
+	  }
+	}
+	);
+	for (root <- (centers ++ nonCenters)) {
+	  flag -= 1;
+	  rootTr = trans(root);
+	  //println(root,rootTr);
+	  if (used(rootTr)) {
+		que.enqueue(rootTr);
+		used(rootTr) = false;
+		while (!que.isEmpty) {
+		  now = que.dequeue();
+		  for (j <- adList(now)._2) {
+			//println(son)
+			son = trans(j);
+			if (used(son)) {
+			  if (flag >= 0) {
+				if (isReplica(son)) resVertex += ((root, j));
+				else vertex += ((root, j));
+			  };
+			  else coVertex += ((root, j));
+			  que.enqueue(son);
+			  used(son) = false;
+			}
+		  }
+		}
+	  }
+	}
+	(vertex.map(x => (x, UNUSE))
+		++ resVertex.map(x => (x, USE))
+		++ coVertex.map(x => (x, SUCEESS))).toIterator;
+  }
+
+  def update(part: Iterator[((Long, Long), (Long, Long))]): Iterator[((Long, Long), Int)] = {
+	val triplets = part.toArray;
+	//	println("triplets:",triplets.foreach(print));
+	val outDegrees = triplets.flatMap({ case (x, y) => Iterator(x, y) }).distinct.sortWith({
+	  case (x, y) => (x._1 < y._1)
+	});
+	//	println("outDefrees:",outDegrees.foreach(print));
+	val adList = triplets.map(x => (x._1._1, x._2._1)).flatMap({
+	  case (src, dst) => Iterator((src, dst), (dst, src))
+	}
+	).groupBy(_._1).map(x => (x._1, x._2.map(_._2)));
+	// TODO
+	val partOutDegrees = adList.map(x => (x._1, x._2.length)).toArray.sortWith({
+	  case (x, y) => (x._1 < y._1)
+	});
+	var centerCount = 0;
+	val centers = scala.collection.mutable.ArrayBuffer[(Long)]();
+	val nonCenters = scala.collection.mutable.ArrayBuffer[(Long)]();
+	//	println("partOutDegrees:",partOutDegrees.foreach(print));
+	// or Join?  If the partitioner will make the RDD in order
+	outDegrees.zip(partOutDegrees).foreach(
+	  {
+		case (pro, now) => {
+		  if (pro._2 == now._2) {
+			nonCenters += (pro._1);
+		  } else {
+			centerCount += 1;
+			centers += (pro._1);
+		  }
+		}
+	  }
+	)
+	bfsReplica(adList.toArray, centers.toArray.sortWith({
+	  case (numA, numB) => {
+		numA < numB
+	  }
+	}), nonCenters.toArray);
+  }
+
+  def run(edgesLoad: RDD[(Long, Long)], cluster: Long, directed: Boolean, th: Int): RDD[(Long, Long)] = {
+
+	val que1 = scala.collection.mutable.Stack[RDD[(Long, Long)]]();
+	val que2 = scala.collection.mutable.Stack[RDD[(Long, Long)]]();
+	val LOWER_BOUND: Long = edgesLoad.count / cluster;
+	var edges: RDD[(Long, Long)] = null;
+	var resTmp: RDD[((Long, Long), Int)] = null;
+	var clusterNum: Long = cluster;
+	var resPro: RDD[(Long, Long)] = null;
+	var triplets: RDD[((Long, Long), (Long, Long))]=null;
+
+	if (directed == true) {
+	  edges = edgesLoad.filter({ case (x, y) => {
+		x < y
+	  }
+	  })
+	} else {
+	  edges = edgesLoad
+	}
+	//	println("clusterNum",clusterNum);
+	while (clusterNum >= 1) {
+	  //	  clusterNum=clusterNum/2;
+	  //	  println("clusterNum",clusterNum);
+	  val outDegrees: RDD[(Long, Long)] = edges.flatMap({
+		case (src, dst) => Array((src.toLong, 1L), (dst.toLong, 1L))
+	  }
+	  ).reduceByKey(_ + _);
+	  //	  println("edges:",edges.foreach(println(_)))
+	  triplets = edges.join(outDegrees).map({
+		case (x, (y, n)) => (y, (x, n)) }
+	  ).join(outDegrees).map({
+		  case (x, (y, n)) => y._2>n match{
+			case true=>((x, n), y)
+			case _=>(y, (x, n))
+		  }
+		}
+	  );
+	  triplets = triplets.partitionBy(new PowerLyraParitioner(clusterNum.toInt,th));
+//	  triplets = triplets.partitionBy(new HashPartitioner(clusterNum.toInt));
+	  //	  println("triplets:",triplets.foreach(println(_)))
+	  resTmp = triplets.mapPartitions(update, true);
+	  resTmp.cache().count()
+	  edges = resTmp.filter({ case (x, y) => {
+		y == UNUSE
+	  }
+	  }).map(_._1);
+	  que1.push(resTmp.filter({ case (x, y) => {
+		y == USE
+	  }
+	  }).map(_._1));
+	  que2.push(resTmp.filter({ case (x, y) => {
+		y == SUCEESS
+	  }
+	  }).map(_._1));
+	  if (clusterNum == 1) clusterNum = 0;
+	  else clusterNum = Math.max(1, Math.min(clusterNum, edges.count / LOWER_BOUND));
+	  println("ClusterNum=", clusterNum, edges.count());
+	  //	  println("edges:",edges.foreach(print(_)))
+	  //println("resPro:",resPro.foreach(println(_)))
+	}
+	//	println("edges::",edges.foreach(print(_)));
+	//	println("Length:",que.length)
+	while (!que1.isEmpty) {
+	  //	  println("edges:::",edges.foreach(println("important!",_)))
+	  val tmp1 = que1.pop;
+	  val tmp2 = que2.pop;
+	  if (edges.count() == 0) {
+		edges = edges ++ tmp2;
+		edges = edges.flatMap({
+		  case (src, dst) => Iterator((src, src), (src, dst))
+		})
+	  } else edges = edges ++ tmp2;
+	  //	  println("tmp1::",tmp1.foreach(println("answer1:",_)));
+	  //	  println("tmp2::",tmp2.foreach(println("answer2:",_)));
+	  edges = (edges ++ (edges.map(x => (x._2, x._1)).join(tmp1).map(x => (x._2._1, x._2._2)))).distinct().cache();
+	  //	  println("edges:::",edges.foreach(println("important!",_)))
+	}
+	edges;
+  }
+}
+
+
