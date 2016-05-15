@@ -24,140 +24,66 @@ object SSSP {
   val SUCEESS: Int = 2;
 
 
-  def bfsReplica(e: Array[(Long, Array[Long])], centers: Array[Long], nonCenters: Array[Long]): Iterator[((Long, Long), Int)] = {
-	val adList = e.toArray;
-	var flag = centers.length;
-	val vertex = scala.collection.mutable.ArrayBuffer[(Long, Long)]();
-	val coVertex = scala.collection.mutable.ArrayBuffer[(Long, Long)]();
-	val resVertex = scala.collection.mutable.ArrayBuffer[(Long, Long)]();
-	val used = Array.fill(adList.size)(true);
-	val isReplica = Array.fill(adList.size)(true);
-	val trans = adList.map(x => x._1).zipWithIndex.toMap;
-	var root: Long = 0
-	var now: Int = 0
-	var son: Int = 0
-	var rootTr: Int = 0;
-	val que = scala.collection.mutable.Queue[Int]();
-	centers.foreach({
-	  case x => {
-		isReplica(trans(x)) = false;
-	  }
-	}
-	);
-	for (root <- (centers ++ nonCenters)) {
-	  flag -= 1;
-	  rootTr = trans(root);
-	  //println(root,rootTr);
-	  if (used(rootTr)) {
-		que.enqueue(rootTr);
-		used(rootTr) = false;
-		while (!que.isEmpty) {
-		  now = que.dequeue();
-		  for (j <- adList(now)._2) {
-			//println(son)
-			son = trans(j);
-			if (used(son)) {
-			  if (flag >= 0) {
-				if (isReplica(son)) resVertex += ((root, j));
-				else vertex += ((root, j));
-			  };
-			  else coVertex += ((root, j));
-			  que.enqueue(son);
-			  used(son) = false;
-			}
-		  }
-		}
-	  }
-	}
-	(vertex.map(x => (x, UNUSE))
-		++ resVertex.map(x => (x, USE))
-		++ coVertex.map(x => (x, SUCEESS))).toIterator;
-  }
+  def run(edgesLoad: RDD[(Long, Long, Long)], Source:Vid , cluster: Long, directed: Boolean, th: Int, delta: Long): RDD[(Long, Long)] = {
 
-  def update(part: Iterator[((Long, Long), (Long, Long))]): Iterator[((Long, Long), Int)] = {
-	val triplets = part.toArray;
-	//	println("triplets:",triplets.foreach(print));
-	val outDegrees = triplets.flatMap({ case (x, y) => Iterator(x, y) }).distinct.sortWith({
-	  case (x, y) => (x._1 < y._1)
-	});
-	//	println("outDefrees:",outDegrees.foreach(print));
-	val adList = triplets.map(x => (x._1._1, x._2._1)).flatMap({
-	  case (src, dst) => Iterator((src, dst), (dst, src))
-	}
-	).groupBy(_._1).map(x => (x._1, x._2.map(_._2)));
-	// TODO
-	val partOutDegrees = adList.map(x => (x._1, x._2.length)).toArray.sortWith({
-	  case (x, y) => (x._1 < y._1)
-	});
-	var centerCount = 0;
-	val centers = scala.collection.mutable.ArrayBuffer[(Long)]();
-	val nonCenters = scala.collection.mutable.ArrayBuffer[(Long)]();
-	//	println("partOutDegrees:",partOutDegrees.foreach(print));
-	// or Join?  If the partitioner will make the RDD in order
-	outDegrees.zip(partOutDegrees).foreach(
-	  {
-		case (pro, now) => {
-		  if (pro._2 == now._2) {
-			nonCenters += (pro._1);
-		  } else {
-			centerCount += 1;
-			centers += (pro._1);
-		  }
-		}
-	  }
-	)
-	bfsReplica(adList.toArray, centers.toArray.sortWith({
-	  case (numA, numB) => {
-		numA < numB
-	  }
-	}), nonCenters.toArray);
-  }
-
-  def run(edgesLoad: RDD[(Long, Long)], Source:Vid , cluster: Long, directed: Boolean, th: Int, delta: Long): RDD[(Long, Long)] = {
-
-	val que1 = scala.collection.mutable.Stack[RDD[(Long, Long)]]();
-	val que2 = scala.collection.mutable.Stack[RDD[(Long, Long)]]();
 	val LOWER_BOUND: Long = edgesLoad.count / cluster;
-	var edges: RDD[(Long, Long)] = null;
-	var resTmp: RDD[((Long, Long), Int)] = null;
+	var edges: RDD[(Vid, Vid, Dis)] = null;
 	var clusterNum: Long = cluster;
-	var activeVertex: RDD[(Long, Long)];
+	var activeVertex: RDD[(Vid, Dis)] = null;
 
-	if (directed == true) {
-	  edges = edgesLoad.filter({ case (x, y) => {
-		x < y
-	  }
-	  })
-	} else {
-	  edges = edgesLoad
-	}
 
-	val vertex = toVertex(edges).map({
+	edges = edgesLoad
+
+
+	var vertex: RDD[(Vid, Dis)] = toVertex(edges.map({
+	  case (x, y, z) => (x, y)
+	})).map({
 	  case x => if(x == Source){
-		(x, 0)
+		(x.asInstanceOf[Long], 0L)
 	  } else {
-		(x, INF)
+		(x.asInstanceOf[Long], INF)
 	  }
 	})
 
 	var k: Int = 0
-	//	println("clusterNum",clusterNum);
-	while (k != INF) {
-//	  triplets = toTriplets(edges)
-//	  triplets = triplets.partitionBy(new PowerLyraParitioner(clusterNum.toInt, th))
-	  edges = edges.partitionBy(new PowerLyraParitioner(clusterNum.toInt, th))
 
-	  activeVertex = vertex.filter({
-		case x => { x/delta == k }
+	while (k != INF) {
+
+	  vertex = vertex.filter({
+		case (v, x) => { (x/delta) >= k }
 	  })
 
-	  while (activeVertex.count() ) {
+	  activeVertex = vertex.filter({
+		case (v, x) => { (x/delta) == k }
+	  })
 
+	  while (activeVertex.count()>0 ) {
+
+		val triplets = edges.map({
+		  case (x, y, d) => (x, (y, d))
+		}).join(activeVertex).map({
+		  case (x, ((y, d), n)) => (y, (x, d, n))
+		}).join(vertex).map({
+		  case (y, ((x, d, n), m)) => ((x, n), (y, Math.min(m, n+d)), d)  //vital opeartor (relax)
+		})
+
+		val newActiveVertex = triplets.map({
+		  case (x, y, z) => y
+		}).subtract(vertex)
+
+		vertex = triplets.flatMap({
+		  case (x, y, d) => Iterator(x, y)
+		}).distinct()
+
+		activeVertex = vertex.filter({
+		  case x => { (x.asInstanceOf[Long]/delta.asInstanceOf[Long]) == k }
+		}).intersection(newActiveVertex)
 	  }
 
-	  resTmp = triplets.mapPartitions(update, true);
-	  resTmp.cache().count()
+	  k +=1
 	}
+
+	vertex
   }
 }
 
